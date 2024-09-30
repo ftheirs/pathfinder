@@ -99,9 +99,7 @@ pub mod from_parts {
 
     use anyhow::Result;
     use pathfinder_common::class_definition::{
-        EntryPointType,
-        SelectorAndOffset,
-        SierraEntryPoints,
+        EntryPointType, SelectorAndOffset, SierraEntryPoints,
     };
     use pathfinder_common::ClassHash;
     use pathfinder_crypto::Felt;
@@ -149,6 +147,30 @@ pub mod from_parts {
 
         super::compute_sierra_class_hash(contract_definition)
     }
+}
+
+pub fn compute_cairo_hinted_class_hash(
+    contract_definition: &json::CairoContractDefinition,
+) -> Result<Felt> {
+    use std::io::Write;
+    // It's less efficient than tweaking the formatter to emit the encoding but I
+    // don't know how and this is an emergency issue (mainnt nodes stuck).
+    let mut string_buffer = vec![];
+    let mut ser =
+        serde_json::Serializer::with_formatter(&mut string_buffer, PythonDefaultFormatter);
+    contract_definition
+        .serialize(&mut ser)
+        .context("Serializing contract_definition for Keccak256")?;
+    let raw_json_output = unsafe {
+        // We never emit invalid UTF-8.
+        String::from_utf8_unchecked(string_buffer)
+    };
+    let mut keccak_writer = KeccakWriter::default();
+    keccak_writer
+        .write_all(raw_json_output.as_bytes())
+        .expect("writing to KeccakWriter never fails");
+    let KeccakWriter(hash) = keccak_writer;
+    Ok(truncated_keccak(<[u8; 32]>::from(hash.finalize())))
 }
 
 /// Computes the class hash for given Cairo class definition.
@@ -273,32 +295,7 @@ fn compute_cairo_class_hash(
         add_extra_space_to_cairo_named_tuples(&mut contract_definition.program.reference_manager);
     }
 
-    let truncated_keccak = {
-        use std::io::Write;
-
-        // It's less efficient than tweaking the formatter to emit the encoding but I
-        // don't know how and this is an emergency issue (mainnt nodes stuck).
-        let mut string_buffer = vec![];
-
-        let mut ser =
-            serde_json::Serializer::with_formatter(&mut string_buffer, PythonDefaultFormatter);
-        contract_definition
-            .serialize(&mut ser)
-            .context("Serializing contract_definition for Keccak256")?;
-
-        let raw_json_output = unsafe {
-            // We never emit invalid UTF-8.
-            String::from_utf8_unchecked(string_buffer)
-        };
-
-        let mut keccak_writer = KeccakWriter::default();
-        keccak_writer
-            .write_all(raw_json_output.as_bytes())
-            .expect("writing to KeccakWriter never fails");
-
-        let KeccakWriter(hash) = keccak_writer;
-        truncated_keccak(<[u8; 32]>::from(hash.finalize()))
-    };
+    let truncated_keccak = compute_cairo_hinted_class_hash(&contract_definition)?;
 
     // what follows is defined over at the contract.cairo
 
@@ -535,14 +532,12 @@ impl serde_json::ser::Formatter for PythonDefaultFormatter {
     }
 }
 
-mod json {
+pub mod json {
     use std::borrow::Cow;
     use std::collections::{BTreeMap, HashMap};
 
     use pathfinder_common::class_definition::{
-        EntryPointType,
-        SelectorAndFunctionIndex,
-        SelectorAndOffset,
+        EntryPointType, SelectorAndFunctionIndex, SelectorAndOffset,
     };
 
     pub enum ContractDefinition<'a> {
